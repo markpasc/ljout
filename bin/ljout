@@ -1,16 +1,29 @@
 #!/usr/bin/env python
 
 import collections
+from datetime import datetime, timedelta
 from functools import wraps
 import hashlib
 from itertools import islice
+import json
 import logging
+import os
+from os.path import join, normpath
 import xmlrpclib
 
 from termtool import Termtool, subcommand, argument
 
 
 __version__ = '1.0'
+
+
+def xmlrpclib_binary_to_json(obj):
+    if isinstance(obj, xmlrpclib.Binary):
+        try:
+            return obj.data.decode('utf8')
+        except UnicodeDecodeError:
+            return obj.data
+    raise TypeError("Cannot encode %r as it isn't an xmlrpclib.Binary" % obj)
 
 
 class LJTransport(xmlrpclib.Transport):
@@ -53,9 +66,6 @@ class LJServerProxy(xmlrpclib.ServerProxy):
         return xmlrpclib.ServerProxy._ServerProxy__request(self, methodname, params)
 
 
-_DEFAULT = object()
-
-
 @argument('--site', default='www.livejournal.com')
 @argument('--username')
 @argument('--password')
@@ -88,60 +98,86 @@ class LJOut(Termtool):
         if args.journal is None:
             args.journal = args.username
 
+        events_dir = normpath(join(os.getcwd(), args.path, 'events'))
+        if not os.access(events_dir, os.W_OK):
+            os.makedirs(events_dir)
+
         client = self.client(args)
-        # TODO: load lastsync from exported data?
+        # TODO: load lastsync from exported data
         lastsync = '0'
+        done = False
+        while not done:
+            try:
+                lastsync, done = self.sync_events_since(client, lastsync, args)
+            except xmlrpclib.Fault, fault:
+                # If the fault was "Client is making repeated requests," knock a second off
+                # the lastsync time so the isn't repeated. This could go on for a while
+                # though so hopefully it only happens while debugging.
+                if fault.faultCode != 406:
+                    raise
+                logging.warn("OOPS: Faking lastsync time to circumvent getevents rate limit")
+                lastsync_dt = datetime.strptime(lastsync, '%Y-%m-%d %H:%M:%S')
+                lastsync_dt -= timedelta(seconds=1)
+                lastsync = lastsync_dt.strftime('%Y-%m-%d %H:%M:%S')
 
-        event_ids = set()
-        while True:
-            this_lastsync = lastsync
-            logging.debug("Syncing items since %r", this_lastsync)
-            sync = client.LJ.XMLRPC.syncitems({
-                'lastsync': this_lastsync,
-                'usejournal': args.journal,
-                'auth_method': 'challenge',
-            })
-
-            for item in sync['syncitems']:
-                item_code, item_id = item['item'].split('-', 1)
-                item_id = int(item_id)
-                if item_code == 'L':
-                    event_ids.add(item_id)
-                if item['time'] > lastsync:
-                    lastsync = item['time']
-
-            if event_ids:
-                logging.debug("Getting events since %r", this_lastsync)
-                events = client.LJ.XMLRPC.getevents({
-                    'auth_method': 'challenge',
-                    'usejournal': args.journal,
-                    'selecttype': 'syncitems',
-                    'lastsync': this_lastsync,
-                    'lineendings': 'unix',
-                })
-
-                for event in events['events']:
-                    item_id = event['itemid']
-                    logging.debug('Have syncitem %r?', item_id)
-                    event_ids.remove(item_id)  # must exist
-
-                    self.export_event(event, args)
-
-            if event_ids:
-                logging.debug('Oops, there are syncitems left over :E')
-                raise ValueError("AIEE DIDN'T SEE UPDATE FOR %d EVENTS INCLUDING #%r :E"
-                    % (len(event_ids), iter(event_ids).next()))
-
-            # TODO: don't quit anyway (but do for now while debugging)
-            break
-            # Did we finish?
-            if sync['count'] == sync['total']:
-                break
+        # TODO: write out the lastsync so we can continue from there next time
 
         logging.debug("Exported events!")
 
+    def sync_events_since(self, client, lastsync, args):
+        logging.debug("Syncing items since %r", lastsync)
+        sync = client.LJ.XMLRPC.syncitems({
+            'lastsync': lastsync,
+            'usejournal': args.journal,
+            'auth_method': 'challenge',
+        })
+
+        syncitems = dict()
+        syncitem_lastsync = lastsync
+        for item in sync['syncitems']:
+            item_code, item_id = item['item'].split('-', 1)
+            item_id = int(item_id)
+            if item_code == 'L':
+                syncitems[item_id] = item
+            if item['time'] > syncitem_lastsync:
+                syncitem_lastsync = item['time']
+
+        # If there were no "L" items to sync, there are no events to get in that window of
+        # syncitems, so use its last date for the next sync (now or later).
+        if not syncitems:
+            done = sync['count'] == sync['total']
+            return syncitem_lastsync, done
+
+        logging.debug("Getting events since %r", lastsync)
+        events = client.LJ.XMLRPC.getevents({
+            'auth_method': 'challenge',
+            'usejournal': args.journal,
+            'selecttype': 'syncitems',
+            'lastsync': lastsync,
+            'lineendings': 'unix',
+        })
+
+        for event in events['events']:
+            item_id = event['itemid']
+            syncitem = syncitems.pop(item_id)
+            if syncitem['time'] > lastsync:
+                lastsync = syncitem['time']
+
+            self.export_event(event, args)
+
+        # If it's the last syncitems window AND we used up all the L syncitems, we finished.
+        done = sync['count'] == sync['total'] and not syncitems
+        return lastsync, done
+
     def export_event(self, event, args):
-        pass
+        item_id = event['itemid']
+        try:
+            json_str = json.dumps(event, sort_keys=True, indent=4, default=xmlrpclib_binary_to_json)
+        except TypeError:
+            from pprint import pformat
+            raise TypeError("Could not JSON serialize event: %s" % pformat(event))
+        with open(join(args.path, 'events', '{0}.json'.format(item_id)), 'w') as f:
+            f.write(json_str)
 
 
 if __name__ == '__main__':
