@@ -9,8 +9,11 @@ import json
 import logging
 import os
 from os.path import join, normpath
+from urllib import urlencode
+from xml.etree import ElementTree
 import xmlrpclib
 
+import httplib2
 from termtool import Termtool, subcommand, argument
 
 
@@ -91,9 +94,9 @@ class LJOut(Termtool):
         )
         print "Configured!"
 
-    @subcommand(help='')
+    @subcommand(help='export journal posts')
     @argument('--journal', help="the name of the journal to export (default: user's)")
-    @argument('path', help="path to which to export the journal")
+    @argument('path', help="path to the journal export")
     def events(self, args):
         if args.journal is None:
             args.journal = args.username
@@ -184,6 +187,136 @@ class LJOut(Termtool):
             raise TypeError("Could not JSON serialize event: %s" % pformat(event))
         with open(join(args.path, 'events', '{0}.json'.format(item_id)), 'w') as f:
             f.write(json_str)
+
+    @subcommand(help='export all the comments from the journal')
+    @argument('--journal', help="the name of the journal to export (default: user's)")
+    @argument('path', help="path to the journal export")
+    def comments(self, args):
+        if args.journal is None:
+            args.journal = args.username
+
+        comments_dir = normpath(join(os.getcwd(), args.path, 'comments'))
+        if not os.access(comments_dir, os.W_OK):
+            os.makedirs(comments_dir)
+
+        sessiondata = self.client(args).LJ.XMLRPC.sessiongenerate({
+            'expiration': 'short',
+            'auth_method': 'challenge',
+        })
+        session = sessiondata['ljsession']
+        logging.debug("Got session to fetch comment data with")
+
+        metadata, usermap = self.comment_metadata(session, args)
+        self.export_comments(session, max(metadata.keys()), usermap, args)
+
+    def comment_metadata(self, session, args):
+        # Get all the fresh metadata.
+        max_id = 0
+        metadata, usermap = {}, {}
+        while True:
+            request = {
+                'get': 'comment_meta',
+                'startid': max_id,
+                'authas': args.journal,
+            }
+            url = 'http://{0}/export_comments.bml?{1}'.format(args.site, urlencode(request))
+            h = httplib2.Http()
+            resp, cont = h.request(url, headers={
+                'User-Agent': LJTransport.user_agent,
+                'Cookie': 'ljsession={0}'.format(session),
+            })
+            assert resp.status == 200
+            logging.debug("Fetched comment data starting at %d", max_id)
+
+            doc = ElementTree.fromstring(cont)
+
+            for comment_el in doc.findall('comments/comment'):
+                comment_data = {}
+                comment_id = int(comment_el.attrib['id'])
+                max_id = max(max_id, comment_id)
+                metadata[comment_id] = comment_data
+
+                poster_id = comment_el.attrib.get('posterid')
+                if poster_id:
+                    comment_data['poster_id'] = int(poster_id)
+
+                state = comment_el.attrib.get('state')
+                if state:
+                    comment_data['state'] = state
+
+            for usermap_el in doc.findall('usermaps/usermap'):
+                user_id = int(usermap_el.attrib['id'])
+                user_name = usermap_el.attrib['user']
+                usermap[user_id] = user_name
+
+            # Stop once we found the last comment (the one with max_id for an id).
+            last_max_id = int(doc.findtext('maxid'))
+            if last_max_id in metadata:
+                break
+
+        metadata_str = json.dumps(metadata, sort_keys=True, indent=4)
+        with open(join(args.path, 'comment_metadata.json'), 'w') as f:
+            f.write(metadata_str)
+
+        return metadata, usermap
+
+    def export_comments(self, session, max_id, usermap, args):
+        start_id = 0
+        seen_ids = set()
+        while max_id not in seen_ids:
+            request = {
+                'get': 'comment_body',
+                'startid': start_id,
+                'authas': args.journal,
+                'props': '1',
+            }
+            url = 'http://{0}/export_comments.bml?{1}'.format(args.site, urlencode(request))
+            h = httplib2.Http()
+            resp, cont = h.request(url, headers={
+                'User-Agent': LJTransport.user_agent,
+                'Cookie': 'ljsession={0}'.format(session),
+            })
+            assert resp.status == 200
+            logging.debug("Fetched comment bodies starting at %d", start_id)
+
+            doc = ElementTree.fromstring(cont)
+
+            for comment_el in doc.findall('comments/comment'):
+                comment_data = dict()
+
+                get_attr = lambda c, f: c.attrib.get(f)
+                get_child = lambda c, f: c.findtext(f)
+                noop = lambda x: x
+                fields = {
+                    'id': (get_attr, int, 'id'),
+                    'jitemid': (get_attr, int, 'event_id'),
+                    'posterid': (get_attr, lambda x: usermap.get(int(x)), 'poster'),
+                    'state': (get_attr, noop, 'state'),
+                    'body': (get_child, noop, 'comment'),
+                    'date': (get_child, noop, 'date'),
+                    'subject': (get_child, noop, 'subject'),
+                }
+                for field, buh in fields.iteritems():
+                    getterate, coerce, data_field = buh
+                    value = getterate(comment_el, field)
+                    if value is not None:
+                        value = coerce(value)
+                        comment_data[data_field] = value
+
+                props = dict()
+                for prop_el in comment_el.findall('property'):
+                    prop_name = prop_el.attrib['name']
+                    props[prop_name] = prop_el.text
+                if props:
+                    comment_data['props'] = props
+
+                comment_str = json.dumps(comment_data, sort_keys=True, indent=4)
+                with open(join(args.path, 'comments', '{0}.json'.format(comment_data['id'])), 'w') as f:
+                    f.write(comment_str)
+
+                seen_ids.add(comment_data['id'])
+
+            start_id = max(seen_ids)
 
 
 if __name__ == '__main__':
