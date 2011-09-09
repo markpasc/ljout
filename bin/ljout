@@ -254,9 +254,9 @@ class LJOut(Termtool):
             if last_max_id in metadata:
                 break
 
-        metadata_str = json.dumps(metadata, sort_keys=True, indent=4)
-        with open(join(args.path, 'comment_metadata.json'), 'w') as f:
-            f.write(metadata_str)
+        usermap_str = json.dumps(usermap, sort_keys=True, indent=4)
+        with open(join(args.path, 'usermap.json'), 'w') as f:
+            f.write(usermap_str)
 
         return metadata, usermap
 
