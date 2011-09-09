@@ -102,9 +102,14 @@ class LJOut(Termtool):
         if not os.access(events_dir, os.W_OK):
             os.makedirs(events_dir)
 
+        lastsync_filename = join(args.path, 'events_lastsync.txt')
+        try:
+            with open(lastsync_filename, 'r') as f:
+                lastsync = f.read().strip()
+        except IOError:
+            lastsync = '0'
+
         client = self.client(args)
-        # TODO: load lastsync from exported data
-        lastsync = '0'
         done = False
         while not done:
             try:
@@ -120,7 +125,8 @@ class LJOut(Termtool):
                 lastsync_dt -= timedelta(seconds=1)
                 lastsync = lastsync_dt.strftime('%Y-%m-%d %H:%M:%S')
 
-        # TODO: write out the lastsync so we can continue from there next time
+        with open(lastsync_filename, 'w') as f:
+            f.write(lastsync)
 
         logging.debug("Exported events!")
 
