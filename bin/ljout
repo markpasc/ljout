@@ -1,0 +1,102 @@
+#!/usr/bin/env python
+
+import collections
+from functools import wraps
+import hashlib
+import xmlrpclib
+
+from termtool import Termtool, subcommand, argument
+
+
+class LJServerProxy(xmlrpclib.ServerProxy):
+
+    def __init__(self, uri, username=None, password=None):
+        xmlrpclib.ServerProxy.__init__(self, uri, verbose=True, allow_none=False, use_datetime=True)
+
+        self._username = username
+        self._password = password
+
+    def _ServerProxy__request(self, methodname, params):
+        if (params and isinstance(params[0], collections.Mapping)
+            and params[0].get('auth_method') == 'challenge' and params[0].get('auth_challenge') is None):
+            args = dict(params[0])
+            params = (args,) + params[1:]
+
+            chal = None
+            # Try repeatedly to get a challenge, like jbackup.pl does?
+            while chal is None:
+                challenge_response = self.LJ.XMLRPC.getchallenge()
+                chal = challenge_response.get('challenge')
+
+            args['username'] = self._username
+            args['auth_challenge'] = chal
+            password = hashlib.md5()
+            password.update(self._password)
+            response = hashlib.md5()
+            response.update(chal)
+            response.update(password.hexdigest())
+            args['auth_response'] = response.hexdigest()
+
+        return xmlrpclib.ServerProxy._ServerProxy__request(self, methodname, params)
+
+
+_DEFAULT = object()
+
+
+@argument('--site', default='www.livejournal.com')
+@argument('--username')
+@argument('--password')
+class LJOut(Termtool):
+
+    description = 'Export a LiveJournal.'
+
+    def client(self, args):
+        url = 'http://{0}/interface/xmlrpc'.format(args.site)
+        client = LJServerProxy(url, args.username, args.password)
+        return client
+
+    @subcommand(help='set the username and password to export as')
+    def configure(self, args):
+        if not args.username:
+            args.username = raw_input('Username: ')
+        if not args.password:
+            args.password = raw_input('Password: ')
+        self.write_config_file(
+            '--site', args.site,
+            '--username', args.username,
+            '--password', args.password,
+        )
+        print "Configured!"
+
+    @subcommand(help='')
+    @argument('--journal', help="the name of the journal to export (default: user's)")
+    @argument('path', help="path to which to export the journal")
+    def events(self, args):
+        if args.journal is None:
+            args.journal = args.username
+
+        client = self.client(args)
+        lastsync = '0'
+
+        while True:
+            sync = client.LJ.XMLRPC.syncitems({
+                'lastsync': lastsync,
+                'usejournal': args.journal,
+                'auth_method': 'challenge',
+            })
+            from pprint import pprint
+            pprint(sync)
+            break
+            for item in sync['syncitems']:
+                self.export_event(item, args)
+                if item['time'] > lastsync:
+                    lastsync = item['time']
+            if sync['sync_count'] == sync['sync_total']:
+                break
+
+    def export_event(self, item, args):
+        print item['time']
+
+
+if __name__ == '__main__':
+    LJOut().run()
