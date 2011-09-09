@@ -3,15 +3,26 @@
 import collections
 from functools import wraps
 import hashlib
+from itertools import islice
+import logging
 import xmlrpclib
 
 from termtool import Termtool, subcommand, argument
 
 
+__version__ = '1.0'
+
+
+class LJTransport(xmlrpclib.Transport):
+
+    user_agent = "ljout/{0}".format(__version__)
+
+
 class LJServerProxy(xmlrpclib.ServerProxy):
 
     def __init__(self, uri, username=None, password=None):
-        xmlrpclib.ServerProxy.__init__(self, uri, verbose=True, allow_none=False, use_datetime=True)
+        xmlrpclib.ServerProxy.__init__(self, uri, transport=LJTransport(), allow_none=False,
+            use_datetime=True)
 
         self._username = username
         self._password = password
@@ -27,6 +38,8 @@ class LJServerProxy(xmlrpclib.ServerProxy):
             while chal is None:
                 challenge_response = self.LJ.XMLRPC.getchallenge()
                 chal = challenge_response.get('challenge')
+
+            args['ver'] = 1
 
             args['username'] = self._username
             args['auth_challenge'] = chal
@@ -76,26 +89,59 @@ class LJOut(Termtool):
             args.journal = args.username
 
         client = self.client(args)
+        # TODO: load lastsync from exported data?
         lastsync = '0'
 
+        event_ids = set()
         while True:
+            this_lastsync = lastsync
+            logging.debug("Syncing items since %r", this_lastsync)
             sync = client.LJ.XMLRPC.syncitems({
-                'lastsync': lastsync,
+                'lastsync': this_lastsync,
                 'usejournal': args.journal,
                 'auth_method': 'challenge',
             })
-            from pprint import pprint
-            pprint(sync)
-            break
+
             for item in sync['syncitems']:
-                self.export_event(item, args)
+                item_code, item_id = item['item'].split('-', 1)
+                item_id = int(item_id)
+                if item_code == 'L':
+                    event_ids.add(item_id)
                 if item['time'] > lastsync:
                     lastsync = item['time']
-            if sync['sync_count'] == sync['sync_total']:
+
+            if event_ids:
+                logging.debug("Getting events since %r", this_lastsync)
+                events = client.LJ.XMLRPC.getevents({
+                    'auth_method': 'challenge',
+                    'usejournal': args.journal,
+                    'selecttype': 'syncitems',
+                    'lastsync': this_lastsync,
+                    'lineendings': 'unix',
+                })
+
+                for event in events['events']:
+                    item_id = event['itemid']
+                    logging.debug('Have syncitem %r?', item_id)
+                    event_ids.remove(item_id)  # must exist
+
+                    self.export_event(event, args)
+
+            if event_ids:
+                logging.debug('Oops, there are syncitems left over :E')
+                raise ValueError("AIEE DIDN'T SEE UPDATE FOR %d EVENTS INCLUDING #%r :E"
+                    % (len(event_ids), iter(event_ids).next()))
+
+            # TODO: don't quit anyway (but do for now while debugging)
+            break
+            # Did we finish?
+            if sync['count'] == sync['total']:
                 break
 
-    def export_event(self, item, args):
-        print item['time']
+        logging.debug("Exported events!")
+
+    def export_event(self, event, args):
+        pass
 
 
 if __name__ == '__main__':
