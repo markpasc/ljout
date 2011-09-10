@@ -28,6 +28,11 @@ def xmlrpclib_binary_to_json(obj):
             return obj.data
     raise TypeError("Cannot encode %r as it isn't an xmlrpclib.Binary" % obj)
 
+def set_to_json(obj):
+    if isinstance(obj, collections.Set):
+        return list(obj)
+    raise TypeError("Cannot encode %r as it isn't a set" % obj)
+
 
 class LJTransport(xmlrpclib.Transport):
 
@@ -209,6 +214,11 @@ class LJOut(Termtool):
         metadata, usermap = self.comment_metadata(session, args)
         self.export_comments(session, max(metadata.keys()), usermap, args)
 
+        # Save the usermap (after we export the comments, so we have the userpic data).
+        usermap_str = json.dumps(usermap, sort_keys=True, indent=4, default=set_to_json)
+        with open(join(args.path, 'usermap.json'), 'w') as f:
+            f.write(usermap_str)
+
     def comment_metadata(self, session, args):
         # Get all the fresh metadata.
         max_id = 0
@@ -247,16 +257,14 @@ class LJOut(Termtool):
             for usermap_el in doc.findall('usermaps/usermap'):
                 user_id = int(usermap_el.attrib['id'])
                 user_name = usermap_el.attrib['user']
-                usermap[user_id] = user_name
+                usermap[user_id] = {
+                    'username': user_name,
+                }
 
             # Stop once we found the last comment (the one with max_id for an id).
             last_max_id = int(doc.findtext('maxid'))
             if last_max_id in metadata:
                 break
-
-        usermap_str = json.dumps(usermap, sort_keys=True, indent=4)
-        with open(join(args.path, 'usermap.json'), 'w') as f:
-            f.write(usermap_str)
 
         return metadata, usermap
 
@@ -290,7 +298,7 @@ class LJOut(Termtool):
                 fields = {
                     'id': (get_attr, int, 'id'),
                     'jitemid': (get_attr, int, 'event_id'),
-                    'posterid': (get_attr, lambda x: usermap.get(int(x)), 'poster'),
+                    'posterid': (get_attr, int, 'poster_id'),
                     'state': (get_attr, noop, 'state'),
                     'body': (get_child, noop, 'comment'),
                     'date': (get_child, noop, 'date'),
@@ -306,7 +314,19 @@ class LJOut(Termtool):
                 props = dict()
                 for prop_el in comment_el.findall('property'):
                     prop_name = prop_el.attrib['name']
-                    props[prop_name] = prop_el.text
+                    prop_value = prop_el.text
+                    props[prop_name] = prop_value
+
+                    # Record all picture keywords we see in the usermap.
+                    if prop_name == 'picture_keyword':
+                        poster_id = comment_data['poster_id']
+                        poster_data = usermap[poster_id]
+                        try:
+                            poster_pics = poster_data['userpics']
+                        except KeyError:
+                            poster_pics = poster_data['userpics'] = set()
+                        poster_pics.add(prop_value)
+
                 if props:
                     comment_data['props'] = props
 
