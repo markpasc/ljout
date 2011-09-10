@@ -322,10 +322,7 @@ class LJOut(Termtool):
                     if prop_name == 'picture_keyword':
                         poster_id = comment_data['poster_id']
                         poster_data = usermap[poster_id]
-                        try:
-                            poster_pics = poster_data['userpics']
-                        except KeyError:
-                            poster_pics = poster_data['userpics'] = set()
+                        poster_pics = poster_data.setdefault('userpics', set())
                         poster_pics.add(prop_value)
 
                 if props:
