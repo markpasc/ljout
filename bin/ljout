@@ -306,10 +306,10 @@ class LJOut(Termtool):
                     'subject': (get_child, noop, 'subject'),
                 }
                 for field, buh in fields.iteritems():
-                    getterate, coerce, data_field = buh
+                    getterate, coercerate, data_field = buh
                     value = getterate(comment_el, field)
                     if value is not None:
-                        value = coerce(value)
+                        value = coercerate(value)
                         comment_data[data_field] = value
 
                 props = dict()
