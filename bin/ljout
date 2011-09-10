@@ -3,6 +3,7 @@
 import collections
 from datetime import datetime, timedelta
 from functools import wraps
+import getpass
 import hashlib
 from itertools import islice
 import json
@@ -91,7 +92,7 @@ class LJOut(Termtool):
         if not args.username:
             args.username = raw_input('Username: ')
         if not args.password:
-            args.password = raw_input('Password: ')
+            args.password = getpass.getpass('Password: ')
         self.write_config_file(
             '--site', args.site,
             '--username', args.username,
